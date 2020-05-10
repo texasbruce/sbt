@@ -81,7 +81,7 @@ abstract class AutoPlugin extends Plugins.Basic with PluginsFunctions {
   def trigger: PluginTrigger = noTrigger
 
   /**
-   * This AutoPlugin requires the plugins the [[Plugins]] matcher returned by this method. See [[trigger]].
+   * This AutoPlugin requires the plugins the Plugins matcher returned by this method. See [[trigger]].
    */
   def requires: Plugins = plugins.JvmPlugin
 
@@ -89,20 +89,20 @@ abstract class AutoPlugin extends Plugins.Basic with PluginsFunctions {
 
   override def toString: String = label
 
-  /** The [[Configuration]]s to add to each project that activates this AutoPlugin.*/
+  /** The `Configuration`s to add to each project that activates this AutoPlugin.*/
   def projectConfigurations: Seq[Configuration] = Nil
 
-  /** The [[Setting]]s to add in the scope of each project that activates this AutoPlugin. */
+  /** The `Setting`s to add in the scope of each project that activates this AutoPlugin. */
   def projectSettings: Seq[Setting[_]] = Nil
 
   /**
-   * The [[Setting]]s to add to the build scope for each project that activates this AutoPlugin.
+   * The `Setting` to add to the build scope for each project that activates this AutoPlugin.
    * The settings returned here are guaranteed to be added to a given build scope only once
    * regardless of how many projects for that build activate this AutoPlugin.
    */
   def buildSettings: Seq[Setting[_]] = Nil
 
-  /** The [[Setting]]s to add to the global scope exactly once if any project activates this AutoPlugin. */
+  /** The `Setting`s to add to the global scope exactly once if any project activates this AutoPlugin. */
   def globalSettings: Seq[Setting[_]] = Nil
 
   // TODO?: def commands: Seq[Command]
@@ -267,8 +267,9 @@ object Plugins extends PluginsFunctions {
 
   private[this] def duplicateProvidesError(byAtom: Seq[(Atom, AutoPlugin)]): Unit = {
     val dupsByAtom = byAtom.groupBy(_._1).mapValues(_.map(_._2))
-    val dupStrings = for ((atom, dups) <- dupsByAtom if dups.size > 1)
-      yield s"${atom.label} by ${dups.mkString(", ")}"
+    val dupStrings =
+      for ((atom, dups) <- dupsByAtom if dups.size > 1)
+        yield s"${atom.label} by ${dups.mkString(", ")}"
     val (ns, nl) = if (dupStrings.size > 1) ("s", "\n\t") else ("", " ")
     val message = s"Plugin$ns provided by multiple AutoPlugins:$nl${dupStrings.mkString(nl)}"
     throw AutoPluginException(message)
@@ -325,7 +326,7 @@ ${listConflicts(conflicting)}""")
   }
   private[sbt] def and(a: Plugins, b: Plugins) = b match {
     case Empty    => a
-    case And(ns)  => (a /: ns)(_ && _)
+    case And(ns)  => ns.foldLeft(a)(_ && _)
     case b: Basic => a && b
   }
   private[sbt] def remove(a: Plugins, del: Set[Basic]): Plugins = a match {

@@ -30,7 +30,14 @@ abstract class CommandChannel {
     ()
   }
   def append(exec: Exec): Boolean = {
-    registered.forEach(q => q.synchronized { if (!q.contains(this)) q.add(this); () })
+    registered.forEach(
+      q =>
+        q.synchronized {
+          if (!q.contains(this)) {
+            q.add(this); ()
+          }
+        }
+    )
     commandQueue.add(exec)
   }
   def poll: Option[Exec] = Option(commandQueue.poll)
@@ -55,4 +62,5 @@ case class ConsolePromptEvent(state: State) extends EventMessage
 /*
  * This is a data passed specifically for unprompting local console.
  */
+@deprecated("No longer used", "1.4.0")
 case class ConsoleUnpromptEvent(lastSource: Option[CommandSource]) extends EventMessage

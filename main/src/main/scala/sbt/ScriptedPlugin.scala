@@ -15,7 +15,7 @@ import sbt.Keys._
 import sbt.nio.Keys._
 import sbt.Project._
 import sbt.internal.inc.ModuleUtilities
-import sbt.internal.inc.classpath.ClasspathUtilities
+import sbt.internal.inc.classpath.ClasspathUtil
 import sbt.internal.util.complete.{ DefaultParsers, Parser }
 import sbt.io._
 import sbt.io.syntax._
@@ -51,12 +51,12 @@ object ScriptedPlugin extends AutoPlugin {
   }
   import autoImport._
 
-  override lazy val globalSettings = Seq(
+  override lazy val globalSettings: Seq[Setting[_]] = Seq(
     scriptedBufferLog := true,
     scriptedLaunchOpts := Seq(),
   )
 
-  override lazy val projectSettings = Seq(
+  override lazy val projectSettings: Seq[Setting[_]] = Seq(
     ivyConfigurations ++= Seq(ScriptedConf, ScriptedLaunchConf),
     scriptedSbt := (sbtVersion in pluginCrossBuild).value,
     sbtLauncher := getJars(ScriptedLaunchConf).map(_.get.head).value,
@@ -92,7 +92,8 @@ object ScriptedPlugin extends AutoPlugin {
 
   private[sbt] def scriptedTestsTask: Initialize[Task[AnyRef]] =
     Def.task {
-      val loader = ClasspathUtilities.toLoader(scriptedClasspath.value, scalaInstance.value.loader)
+      val cp = scriptedClasspath.value.get.map(_.toPath)
+      val loader = ClasspathUtil.toLoader(cp, scalaInstance.value.loader)
       try {
         ModuleUtilities.getObject("sbt.scriptedtest.ScriptedTests", loader)
       } catch {
@@ -136,13 +137,18 @@ object ScriptedPlugin extends AutoPlugin {
     val groupP = token(id.examples(pairMap.keySet)) <~ token('/')
 
     // A parser for page definitions
-    val pageP: Parser[ScriptedTestPage] = ("*" ~ NatBasic ~ "of" ~ NatBasic) map {
-      case _ ~ page ~ _ ~ total => ScriptedTestPage(page, total)
+    val pageNumber = (NatBasic & not('0', "zero page number")).flatMap { i =>
+      if (i <= pairs.size) Parser.success(i)
+      else Parser.failure(s"$i exceeds the number of tests (${pairs.size})")
+    }
+    val pageP: Parser[ScriptedTestPage] = ("*" ~> pageNumber ~ ("of" ~> pageNumber)) flatMap {
+      case (page, total) if page <= total => success(ScriptedTestPage(page, total))
+      case (page, total)                  => failure(s"Page $page was greater than $total")
     }
 
     // Grabs the filenames from a given test group in the current page definition.
     def pagedFilenames(group: String, page: ScriptedTestPage): Seq[String] = {
-      val files = pairMap(group).toSeq.sortBy(_.toLowerCase)
+      val files = pairMap.get(group).toSeq.flatten.sortBy(_.toLowerCase)
       val pageSize = files.size / page.total
       // The last page may loose some values, so we explicitly keep them
       val dropped = files.drop(pageSize * (page.page - 1))

@@ -10,15 +10,17 @@ package sbt
 import java.io.File
 import java.net.URI
 
+import scala.annotation.tailrec
 import sbt.KeyRanks.{ DTask, Invisible }
 import sbt.Scope.{ GlobalScope, ThisScope }
 import sbt.internal.util.Types.const
 import sbt.internal.util.complete.Parser
 import sbt.internal.util._
+import Util._
 import sbt.util.Show
 
 /** A concrete settings system that uses `sbt.Scope` for the scope type. */
-object Def extends Init[Scope] with TaskMacroExtra {
+object Def extends Init[Scope] with TaskMacroExtra with InitializeImplicits {
   type Classpath = Seq[Attributed[File]]
 
   def settings(ss: SettingsDefinition*): Seq[Setting[_]] = ss.flatMap(_.settings)
@@ -54,12 +56,14 @@ object Def extends Init[Scope] with TaskMacroExtra {
       keyNameColor: Option[String] = None,
   ): Show[ScopedKey[_]] =
     Show[ScopedKey[_]](
-      key =>
-        Scope.display(
-          key.scope,
-          withColor(key.key.label, keyNameColor),
-          ref => displayRelative2(current, ref)
-        )
+      key => {
+        val color: String => String = withColor(_, keyNameColor)
+        key.scope.extra.toOption
+          .flatMap(_.get(Scope.customShowString).map(color))
+          .getOrElse {
+            Scope.display(key.scope, color(key.key.label), ref => displayRelative2(current, ref))
+          }
+      }
     )
 
   private[sbt] def showShortKey(
@@ -129,13 +133,19 @@ object Def extends Init[Scope] with TaskMacroExtra {
       project: Reference,
       trailingSlash: Boolean
   ): String = {
-    val trailing = if (trailingSlash) " /" else ""
-    project match {
-      case BuildRef(current.build)      => "ThisBuild" + trailing
-      case `current`                    => ""
-      case ProjectRef(current.build, x) => x + trailing
-      case _                            => Reference.display(project) + trailing
+    import Reference.{ display => displayRef }
+    @tailrec def loop(ref: Reference): String = ref match {
+      case ProjectRef(b, p) => if (b == current.build) loop(LocalProject(p)) else displayRef(ref)
+      case BuildRef(b)      => if (b == current.build) loop(ThisBuild) else displayRef(ref)
+      case RootProject(b)   => if (b == current.build) loop(LocalRootProject) else displayRef(ref)
+      case LocalProject(p)  => if (p == current.project) "" else p
+      case ThisBuild        => "ThisBuild"
+      case LocalRootProject => "<root>"
+      case ThisProject      => "<this>"
     }
+    val str = loop(project)
+    if (trailingSlash && !str.isEmpty) s"$str /"
+    else str
   }
 
   @deprecated("Use variant without multi", "1.1.1")
@@ -171,8 +181,8 @@ object Def extends Init[Scope] with TaskMacroExtra {
   override def deriveAllowed[T](s: Setting[T], allowDynamic: Boolean): Option[String] =
     super.deriveAllowed(s, allowDynamic) orElse
       (if (s.key.scope != ThisScope)
-         Some(s"Scope cannot be defined for ${definedSettingString(s)}")
-       else None) orElse
+         s"Scope cannot be defined for ${definedSettingString(s)}".some
+       else none) orElse
       s.dependencies
         .find(k => k.scope != ThisScope)
         .map(
@@ -258,6 +268,14 @@ object Def extends Init[Scope] with TaskMacroExtra {
   def taskKey[T](description: String): TaskKey[T] = macro std.KeyMacro.taskKeyImpl[T]
   def inputKey[T](description: String): InputKey[T] = macro std.KeyMacro.inputKeyImpl[T]
 
+  class InitOps[T](private val x: Initialize[T]) extends AnyVal {
+    def toTaskable: Taskable[T] = x
+  }
+
+  class InitTaskOps[T](private val x: Initialize[Task[T]]) extends AnyVal {
+    def toTaskable: Taskable[T] = x
+  }
+
   private[sbt] def dummy[T: Manifest](name: String, description: String): (TaskKey[T], Task[T]) =
     (TaskKey[T](name, description, DTask), dummyTask(name))
 
@@ -299,4 +317,13 @@ trait TaskMacroExtra {
   implicit def stateParserToInput[T](
       @deprecated("unused", "") in: State => Parser[T]
   ): std.ParserInput[T] = ???
+}
+
+sealed trait InitializeImplicits0 { self: Def.type =>
+  implicit def initOps[T](x: Def.Initialize[T]): Def.InitOps[T] = new Def.InitOps(x)
+}
+
+sealed trait InitializeImplicits extends InitializeImplicits0 { self: Def.type =>
+  implicit def initTaskOps[T](x: Def.Initialize[Task[T]]): Def.InitTaskOps[T] =
+    new Def.InitTaskOps(x)
 }

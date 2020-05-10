@@ -77,10 +77,10 @@ final class SuiteResult(
   def +(other: SuiteResult): SuiteResult = {
     val combinedTestResult =
       (result, other.result) match {
-        case (TestResult.Passed, TestResult.Passed) => TestResult.Passed
-        case (_, TestResult.Error)                  => TestResult.Error
-        case (TestResult.Error, _)                  => TestResult.Error
-        case _                                      => TestResult.Failed
+        case (TestResult.Passed, TestResult.Passed) => TestResult.Passed: TestResult
+        case (_, TestResult.Error)                  => TestResult.Error: TestResult
+        case (TestResult.Error, _)                  => TestResult.Error: TestResult
+        case _                                      => TestResult.Failed: TestResult
       }
     new SuiteResult(
       combinedTestResult,
@@ -131,7 +131,7 @@ object TestEvent {
     }
 
   private[sbt] def overallResult(events: Seq[TEvent]): TestResult =
-    ((TestResult.Passed: TestResult) /: events) { (sum, event) =>
+    events.foldLeft(TestResult.Passed: TestResult) { (sum, event) =>
       (sum, event.status) match {
         case (TestResult.Error, _)  => TestResult.Error
         case (_, TStatus.Error)     => TestResult.Error

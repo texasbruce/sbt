@@ -9,8 +9,10 @@ package sbt
 package internal
 
 import java.util.Locale
+
 import scala.util.control.NonFatal
 import sbt.internal.util.ConsoleAppender
+import sbt.internal.util.complete.SizeParser
 
 // See also BuildPaths.scala
 // See also LineReader.scala
@@ -67,6 +69,8 @@ object SysProp {
   def traces: Boolean = getOrFalse("sbt.traces")
   def client: Boolean = getOrFalse("sbt.client")
   def ci: Boolean = getOrFalse("sbt.ci")
+  def allowRootDir: Boolean = getOrFalse("sbt.rootdir")
+  def legacyTestReport: Boolean = getOrFalse("sbt.testing.legacyreport")
 
   def watchMode: String =
     sys.props.get("sbt.watch.mode").getOrElse("auto")
@@ -82,11 +86,15 @@ object SysProp {
    */
   lazy val color: Boolean = ConsoleAppender.formatEnabledInEnv
 
-  def closeClassLoaders: Boolean = getOrTrue("sbt.classloader.close")
+  def closeClassLoaders: Boolean = getOrFalse("sbt.classloader.close")
 
-  def supershell: Boolean = color && getOrTrue("sbt.supershell")
+  def fileCacheSize: Long =
+    SizeParser(System.getProperty("sbt.file.cache.size", "128M")).getOrElse(128L * 1024 * 1024)
+  def dumbTerm: Boolean = sys.env.get("TERM").contains("dumb")
+  def supershell: Boolean = booleanOpt("sbt.supershell").getOrElse(!dumbTerm && color)
 
   def supershellSleep: Long = long("sbt.supershell.sleep", 100L)
+  def supershellBlankZone: Int = int("sbt.supershell.blankzone", 1)
 
   def defaultUseCoursier: Boolean = {
     val coursierOpt = booleanOpt("sbt.coursier")

@@ -7,17 +7,24 @@
 
 package sbt.internal;
 
-import java.io.IOException;
+import java.io.File;
 import java.net.URL;
-import java.net.URLClassLoader;
+import sbt.util.Logger;
 
-final class FlatLoader extends URLClassLoader {
+final class FlatLoader extends ManagedClassLoader {
   static {
     ClassLoader.registerAsParallelCapable();
   }
 
-  FlatLoader(final URL[] urls, final ClassLoader parent) {
-    super(urls, parent);
+  FlatLoader(
+      final URL[] urls,
+      final ClassLoader parent,
+      final File file,
+      final boolean close,
+      final boolean allowZombies,
+      final Logger logger) {
+    super(urls, parent, close, allowZombies, logger);
+    setTempDir(file);
   }
 
   @Override
@@ -29,10 +36,5 @@ final class FlatLoader extends URLClassLoader {
       jars.append("\n");
     }
     return "FlatLoader(\n  parent = " + getParent() + "\n  jars = " + jars.toString() + ")";
-  }
-
-  @Override
-  public void close() throws IOException {
-    if (SysProp.closeClassLoaders()) super.close();
   }
 }

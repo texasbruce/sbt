@@ -10,6 +10,7 @@ package sbt
 import java.net.URI
 
 import sbt.internal.util.{ AttributeKey, AttributeMap, Dag }
+import sbt.internal.util.Util._
 
 import sbt.io.IO
 
@@ -179,6 +180,22 @@ object Scope {
     displayMasked(scope, sep, showProject, mask, false)
 
   /**
+   * Allows the user to override the result of `Scope.display` or `Scope.displayMasked` for a
+   * particular scope. This can be used to enhance super shell and/or error reporting for tasks
+   * that use mangled names. For example, one might have:
+   * {{{
+   *   val mangledKey = TaskKey[Unit]("foo_slash_bar")
+   *   val attributeMap = AttributeMap.empty.put(Scope.customShowString("foo/bar"))
+   *   val sanitizedKey = mangledKey.copy(scope = mangledKey.copy(extra = Select(attributeMap)))
+   *   sanitizedKey := { ... }
+   * }}}
+   *
+   * Now whenever the `foo_slash_bar` task specified by sanitizedKey is evaluated, it will display
+   * "foo/bar" in super shell progress and in the error message if an error is thrown.
+   */
+  val customShowString = AttributeKey[String]("scope-custom-show-string")
+
+  /**
    * unified slash style introduced in sbt 1.1.0.
    * By default, sbt will no longer display the Zero-config,
    * so `name` will render as `name` as opposed to `{uri}proj/Zero/name`.
@@ -193,20 +210,22 @@ object Scope {
       showZeroConfig: Boolean
   ): String = {
     import scope.{ project, config, task, extra }
-    val zeroConfig = if (showZeroConfig) "Zero /" else ""
-    val configPrefix = config.foldStrict(display, zeroConfig, "./")
-    val taskPrefix = task.foldStrict(_.label + " /", "", "./")
-    val extras = extra.foldStrict(_.entries.map(_.toString).toList, Nil, Nil)
-    val postfix = if (extras.isEmpty) "" else extras.mkString("(", ", ", ")")
-    if (scope == GlobalScope) "Global / " + sep + postfix
-    else
-      mask.concatShow(
-        appendSpace(projectPrefix(project, showProject)),
-        appendSpace(configPrefix),
-        appendSpace(taskPrefix),
-        sep,
-        postfix
-      )
+    extra.toOption.flatMap(_.get(customShowString)).getOrElse {
+      val zeroConfig = if (showZeroConfig) "Zero /" else ""
+      val configPrefix = config.foldStrict(display, zeroConfig, "./")
+      val taskPrefix = task.foldStrict(_.label + " /", "", "./")
+      val extras = extra.foldStrict(_.entries.map(_.toString).toList, nil, nil)
+      val postfix = if (extras.isEmpty) "" else extras.mkString("(", ", ", ")")
+      if (scope == GlobalScope) "Global / " + sep + postfix
+      else
+        mask.concatShow(
+          appendSpace(projectPrefix(project, showProject)),
+          appendSpace(configPrefix),
+          appendSpace(taskPrefix),
+          sep,
+          postfix
+        )
+    }
   }
 
   private[sbt] def appendSpace(s: String): String =
@@ -328,6 +347,7 @@ object Scope {
             val t = tLinIt.next()
             if (scope.extra.isSelect) {
               res += Scope(px, c, t, scope.extra)
+              ()
             }
             res += Scope(px, c, t, Zero)
           }
@@ -343,7 +363,8 @@ object Scope {
         val projAxes: Seq[ScopeAxis[ResolvedReference]] =
           resolvedProj match {
             case pr: ProjectRef => index.project(pr)
-            case br: BuildRef   => List(Select(br), Zero)
+            case br: BuildRef =>
+              List(Select(br): ScopeAxis[ResolvedReference], Zero: ScopeAxis[ResolvedReference])
           }
         expandDelegateScopes(resolvedProj)(projAxes)
     }
@@ -351,13 +372,15 @@ object Scope {
 
   private val zeroL = List(Zero)
   def withZeroAxis[T](base: ScopeAxis[T]): Seq[ScopeAxis[T]] =
-    if (base.isSelect) List(base, Zero)
+    if (base.isSelect) List(base, Zero: ScopeAxis[T])
     else zeroL
 
   def withGlobalScope(base: Scope): Seq[Scope] =
     if (base == GlobalScope) GlobalScope :: Nil else base :: GlobalScope :: Nil
   def withRawBuilds(ps: Seq[ScopeAxis[ProjectRef]]): Seq[ScopeAxis[ResolvedReference]] =
-    ps ++ (ps flatMap rawBuild).distinct :+ Zero
+    (ps: Seq[ScopeAxis[ResolvedReference]]) ++
+      ((ps flatMap rawBuild).distinct: Seq[ScopeAxis[ResolvedReference]]) :+
+      (Zero: ScopeAxis[ResolvedReference])
 
   def rawBuild(ps: ScopeAxis[ProjectRef]): Seq[ScopeAxis[BuildRef]] = ps match {
     case Select(ref) => Select(BuildRef(ref.build)) :: Nil; case _ => Nil
@@ -403,8 +426,8 @@ object Scope {
   def topologicalSort[T](node: T, appendZero: Boolean)(
       dependencies: T => Seq[T]
   ): Seq[ScopeAxis[T]] = {
-    val o = Dag.topologicalSortUnchecked(node)(dependencies).map(Select.apply)
-    if (appendZero) o ::: Zero :: Nil
+    val o = Dag.topologicalSortUnchecked(node)(dependencies).map(x => Select(x): ScopeAxis[T])
+    if (appendZero) o ::: (Zero: ScopeAxis[T]) :: Nil
     else o
   }
   def globalProjectDelegates(scope: Scope): Seq[Scope] =

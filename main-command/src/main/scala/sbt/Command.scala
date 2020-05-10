@@ -11,6 +11,7 @@ import sbt.internal.inc.ReflectUtilities
 import sbt.internal.util.complete.{ DefaultParsers, EditDistance, Parser }
 import sbt.internal.util.Types.const
 import sbt.internal.util.{ AttributeKey, AttributeMap, Util }
+import sbt.internal.util.Util.{ nilSeq }
 
 /**
  * An operation that can be executed from the sbt console.
@@ -52,8 +53,11 @@ private[sbt] final class SimpleCommand(
 private[sbt] final class ArbitraryCommand(
     val parser: State => Parser[() => State],
     val help: State => Help,
-    val tags: AttributeMap
+    val tags: AttributeMap,
+    override val nameOption: Option[String]
 ) extends Command {
+  def this(parser: State => Parser[() => State], help: State => Help, tags: AttributeMap) =
+    this(parser, help, tags, None)
   def tag[T](key: AttributeKey[T], value: T): ArbitraryCommand =
     new ArbitraryCommand(parser, help, tags.put(key, value))
 }
@@ -124,6 +128,8 @@ object Command {
   def customHelp(parser: State => Parser[() => State], help: State => Help): Command =
     new ArbitraryCommand(parser, help, AttributeMap.empty)
 
+  private[sbt] def custom(parser: State => Parser[() => State], help: Help, name: String): Command =
+    new ArbitraryCommand(parser, const(help), AttributeMap.empty, Some(name))
   def custom(parser: State => Parser[() => State], help: Help = Help.empty): Command =
     customHelp(parser, const(help))
 
@@ -146,7 +152,7 @@ object Command {
   def combine(cmds: Seq[Command]): State => Parser[() => State] = {
     val (simple, arbs) = separateCommands(cmds)
     state =>
-      (simpleParser(simple)(state) /: arbs.map(_ parser state))(_ | _)
+      arbs.map(_ parser state).foldLeft(simpleParser(simple)(state))(_ | _)
   }
 
   private[this] def separateCommands(
@@ -190,7 +196,7 @@ object Command {
     s"Not a valid $label: $value" + similar(value, allowed)
 
   def similar(value: String, allowed: Iterable[String]): String = {
-    val suggested = if (value.length > 2) suggestions(value, allowed.toSeq) else Nil
+    val suggested = if (value.length > 2) suggestions(value, allowed.toSeq) else nilSeq
     if (suggested.isEmpty) "" else suggested.mkString(" (similar: ", ", ", ")")
   }
 
@@ -235,7 +241,11 @@ private final class Help0(
     val more: Set[String]
 ) extends Help {
   def ++(h: Help): Help =
-    new Help0(Help0.this.brief ++ h.brief, Help0.this.detail ++ h.detail, more ++ h.more)
+    new Help0(
+      Help0.this.brief ++ h.brief,
+      Map(Help0.this.detail.toSeq ++ h.detail.toSeq: _*),
+      more ++ h.more
+    )
 }
 
 object Help {

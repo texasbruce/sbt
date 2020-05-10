@@ -84,6 +84,7 @@ object ConcurrentRestrictions {
   val All = Tag("all")
 
   type TagMap = Map[Tag, Int]
+  val TagMap = Map.empty[Tag, Int]
 
   /**
    * Implements concurrency restrictions on tasks based on Tags.
@@ -116,7 +117,7 @@ object ConcurrentRestrictions {
     m.updated(a, newb)
   }
   private[this] def merge[A, B](m: Map[A, B], n: Map[A, B])(f: (B, B) => B): Map[A, B] =
-    (m /: n) { case (acc, (a, b)) => update(acc, a, b)(f) }
+    n.foldLeft(m) { case (acc, (a, b)) => update(acc, a, b)(f) }
 
   /**
    * Constructs a CompletionService suitable for backing task execution based on the provided restrictions on concurrent task execution.
@@ -129,7 +130,10 @@ object ConcurrentRestrictions {
       warn: String => Unit
   ): (CompletionService[A, R], () => Unit) = {
     val pool = Executors.newCachedThreadPool()
-    (completionService[A, R](pool, tags, warn), () => { pool.shutdownNow(); () })
+    (completionService[A, R](pool, tags, warn), () => {
+      pool.shutdownNow()
+      ()
+    })
   }
 
   /**
@@ -166,26 +170,31 @@ object ConcurrentRestrictions {
         if (tags valid newState) {
           tagState = newState
           submitValid(node, work)
+          ()
         } else {
           if (running == 0) errorAddingToIdle()
           pending.add(new Enqueue(node, work))
+          ()
         }
         ()
       }
-      private[this] def submitValid(node: A, work: () => R) = {
+      private[this] def submitValid(node: A, work: () => R): Unit = {
         running += 1
         val wrappedWork = () =>
           try work()
           finally cleanup(node)
         CompletionService.submit(wrappedWork, jservice)
+        ()
       }
       private[this] def cleanup(node: A): Unit = synchronized {
         running -= 1
         tagState = tags.remove(tagState, node)
-        if (!tags.valid(tagState))
+        if (!tags.valid(tagState)) {
           warn(
             "Invalid restriction: removing a completed node from a valid system must result in a valid system."
           )
+          ()
+        }
         submitValid(new LinkedList)
       }
       private[this] def errorAddingToIdle() =
@@ -205,8 +214,11 @@ object ConcurrentRestrictions {
           if (tags.valid(newState)) {
             tagState = newState
             submitValid(next.node, next.work)
-          } else
+            ()
+          } else {
             tried.add(next)
+            ()
+          }
           submitValid(tried)
         }
 

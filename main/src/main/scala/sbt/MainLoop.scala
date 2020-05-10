@@ -10,15 +10,14 @@ package sbt
 import java.io.PrintWriter
 import java.util.Properties
 
-import jline.TerminalFactory
-import sbt.internal.{ Aggregation, ShutdownHooks }
+import sbt.internal.ShutdownHooks
 import sbt.internal.langserver.ErrorCodes
-import sbt.internal.util.complete.Parser
-import sbt.internal.util.{ ErrorHandling, GlobalLogBacking }
+import sbt.internal.protocol.JsonRpcResponseError
+import sbt.internal.nio.CheckBuildSources.CheckBuildSourcesKey
+import sbt.internal.util.{ ErrorHandling, GlobalLogBacking, Terminal }
 import sbt.io.{ IO, Using }
 import sbt.protocol._
 import sbt.util.Logger
-import sbt.nio.Keys._
 
 import scala.annotation.tailrec
 import scala.util.control.NonFatal
@@ -30,7 +29,7 @@ object MainLoop {
     // We've disabled jline shutdown hooks to prevent classloader leaks, and have been careful to always restore
     // the jline terminal in finally blocks, but hitting ctrl+c prevents finally blocks from being executed, in that
     // case the only way to restore the terminal is in a shutdown hook.
-    val shutdownHook = ShutdownHooks.add(() => TerminalFactory.get().restore())
+    val shutdownHook = ShutdownHooks.add(Terminal.restore)
 
     try {
       runLoggedLoop(state, state.globalLogging.backing)
@@ -144,10 +143,7 @@ object MainLoop {
         case Right(s)                  => s
         case Left(t: xsbti.FullReload) => throw t
         case Left(t: RebootCurrent)    => throw t
-        case Left(Reload) =>
-          val remaining = state.currentCommand.toList ::: state.remainingCommands
-          state.copy(remainingCommands = Exec("reload", None, None) :: remaining)
-        case Left(t) => state.handleError(t)
+        case Left(t)                   => state.handleError(t)
       }
     } catch {
       case oom: OutOfMemoryError if oom.getMessage.contains("Metaspace") =>
@@ -170,7 +166,7 @@ object MainLoop {
                    "ScalaLibrary"
                else "")
         val msg: String =
-          s"Caught $oom\nTo best utilize classloader caching and to prevent file handle leaks, we" +
+          s"Caught $oom\nTo best utilize classloader caching and to prevent file handle leaks, we " +
             s"recommend running sbt without a MaxMetaspaceSize limit. $testOrRunMessage"
         state.log.error(msg)
         state.log.error("\n")
@@ -182,12 +178,18 @@ object MainLoop {
     val channelName = exec.source map (_.channelName)
     StandardMain.exchange publishEventMessage
       ExecStatusEvent("Processing", channelName, exec.execId, Vector())
-
     try {
       def process(): State = {
-        val newState = Command.process(exec.commandLine, state)
-        if (exec.commandLine.contains("session"))
-          newState.get(hasCheckedMetaBuild).foreach(_.set(false))
+        val progressState = state.get(sbt.Keys.currentTaskProgress) match {
+          case Some(_) => state
+          case _ =>
+            if (state.get(Keys.stateBuildStructure).isDefined) {
+              val extracted = Project.extract(state)
+              val progress = EvaluateTask.executeProgress(extracted, extracted.structure, state)
+              state.put(sbt.Keys.currentTaskProgress, new Keys.TaskProgress(progress))
+            } else state
+        }
+        val newState = Command.process(exec.commandLine, progressState)
         val doneEvent = ExecStatusEvent(
           "Done",
           channelName,
@@ -201,30 +203,19 @@ object MainLoop {
         } else { // send back a notification
           StandardMain.exchange publishEventMessage doneEvent
         }
-        newState
+        newState.get(sbt.Keys.currentTaskProgress).foreach(_.progress.stop())
+        newState.remove(sbt.Keys.currentTaskProgress)
       }
-      val checkCommand = state.currentCommand match {
-        // If the user runs reload directly, we want to be sure that we update the previous
-        // cache for checkBuildSources / changedInputFiles but we don't want to display any
-        // warnings. Without filling the previous cache, it's possible for the user to run
-        // reload and be prompted with a warning in spite of reload having just run and no build
-        // sources having changed.
-        case Some(exec) if exec.commandLine == "reload" => "checkBuildSources / changedInputFiles"
-        case _                                          => "checkBuildSources"
-      }
-      Parser.parse(
-        checkCommand,
-        state.put(Aggregation.suppressShow, true).combinedParser
-      ) match {
-        case Right(cmd) =>
-          cmd() match {
-            case s if s.remainingCommands.headOption.map(_.commandLine).contains("reload") =>
-              s.remove(Aggregation.suppressShow)
-            case _ => process()
-          }
-        case Left(_) => process()
+      state.get(CheckBuildSourcesKey) match {
+        case Some(cbs) =>
+          if (!cbs.needsReload(state, exec.commandLine)) process()
+          else Exec("reload", None, None) +: exec +: state.remove(CheckBuildSourcesKey)
+        case _ => process()
       }
     } catch {
+      case err: JsonRpcResponseError =>
+        StandardMain.exchange.respondError(err, exec.execId, channelName.map(CommandSource(_)))
+        throw err
       case err: Throwable =>
         val errorEvent = ExecStatusEvent(
           "Error",
@@ -232,9 +223,10 @@ object MainLoop {
           exec.execId,
           Vector(),
           ExitCode(ErrorCodes.UnknownError),
+          Option(err.getMessage),
         )
         import sbt.protocol.codec.JsonProtocol._
-        StandardMain.exchange publishEvent errorEvent
+        StandardMain.exchange.publishEvent(errorEvent)
         throw err
     }
   }

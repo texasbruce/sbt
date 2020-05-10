@@ -154,26 +154,17 @@ object EvaluateTask {
   import Keys.state
   import std.Transform
 
+  @com.github.ghik.silencer.silent
   lazy private val sharedProgress = new TaskTimings(reportOnShutdown = true)
   def taskTimingProgress: Option[ExecuteProgress[Task]] =
-    if (SysProp.taskTimings) {
-      if (SysProp.taskTimingsOnShutdown)
-        Some(sharedProgress)
-      else
-        Some(new TaskTimings(reportOnShutdown = false))
-    } else None
+    if (SysProp.taskTimingsOnShutdown) Some(sharedProgress)
+    else None
 
   lazy private val sharedTraceEvent = new TaskTraceEvent()
   def taskTraceEvent: Option[ExecuteProgress[Task]] =
     if (SysProp.traces) {
       Some(sharedTraceEvent)
     } else None
-
-  def taskProgress: ExecuteProgress[Task] = {
-    val appender = MainAppender.defaultScreen(StandardMain.console)
-    val log = LogManager.progressLogger(appender)
-    new TaskProgress(log)
-  }
 
   // sbt-pgp calls this
   @deprecated("No longer used", "1.3.0")
@@ -234,22 +225,56 @@ object EvaluateTask {
       structure: BuildStructure,
       state: State
   ): ExecuteProgress[Task] = {
-    val maker: Seq[Keys.TaskProgress] = getSetting(
-      Keys.progressReports,
-      Seq(),
-      extracted,
-      structure
-    )
-    val reporters = maker map { _.progress }
-    // configure the logger for super shell
-    ConsoleAppender.setShowProgress((reporters collect {
-      case p: TaskProgress => ()
-    }).nonEmpty)
-    reporters match {
-      case xs if xs.isEmpty   => ExecuteProgress.empty[Task]
-      case xs if xs.size == 1 => xs.head
-      case xs                 => ExecuteProgress.aggregate[Task](xs)
-    }
+    state
+      .get(currentTaskProgress)
+      .map { tp =>
+        new ExecuteProgress[Task] {
+          val progress = tp.progress
+          override def initial(): Unit = progress.initial()
+          override def afterRegistered(
+              task: Task[_],
+              allDeps: Iterable[Task[_]],
+              pendingDeps: Iterable[Task[_]]
+          ): Unit =
+            progress.afterRegistered(task, allDeps, pendingDeps)
+          override def afterReady(task: Task[_]): Unit = progress.afterReady(task)
+          override def beforeWork(task: Task[_]): Unit = progress.beforeWork(task)
+          override def afterWork[A](task: Task[A], result: Either[Task[A], Result[A]]): Unit =
+            progress.afterWork(task, result)
+          override def afterCompleted[A](task: Task[A], result: Result[A]): Unit =
+            progress.afterCompleted(task, result)
+          override def afterAllCompleted(results: RMap[Task, Result]): Unit =
+            progress.afterAllCompleted(results)
+          override def stop(): Unit = {}
+        }
+      }
+      .getOrElse {
+        val maker: Seq[Keys.TaskProgress] = getSetting(
+          Keys.progressReports,
+          Seq(),
+          extracted,
+          structure
+        )
+        val progressReporter = extracted.getOpt(progressState in ThisBuild).flatMap {
+          case Some(ps) =>
+            ps.reset()
+            ConsoleAppender.setShowProgress(true)
+            val appender = MainAppender.defaultScreen(StandardMain.console)
+            ProgressState.set(ps)
+            val log = LogManager.progressLogger(appender)
+            Some(new TaskProgress(log))
+          case _ => None
+        }
+        val reporters = maker.map(_.progress) ++ progressReporter ++
+          (if (SysProp.taskTimings)
+             new TaskTimings(reportOnShutdown = false, state.globalLogging.full) :: Nil
+           else Nil)
+        reporters match {
+          case xs if xs.isEmpty   => ExecuteProgress.empty[Task]
+          case xs if xs.size == 1 => xs.head
+          case xs                 => ExecuteProgress.aggregate[Task](xs)
+        }
+      }
   }
   // TODO - Should this pull from Global or from the project itself?
   private[sbt] def forcegc(extracted: Extracted, structure: BuildStructure): Boolean =
@@ -346,7 +371,7 @@ object EvaluateTask {
       ExceptionCategory(ex) match {
         case AlreadyHandled => ()
         case m: MessageOnly => if (msg.isEmpty) log.error(m.message)
-        case f: Full        => if (f.exception != Reload) log.trace(f.exception)
+        case f: Full        => log.trace(f.exception)
       }
     }
 
@@ -354,7 +379,7 @@ object EvaluateTask {
       val msgString = (msg.toList ++ ex.toList.map(ErrorHandling.reducedToString)).mkString("\n\t")
       val log = getStreams(key, streams).log
       val display = contextDisplay(state, ConsoleAppender.formatEnabledInEnv)
-      if (!ex.contains(Reload)) log.error("(" + display.show(key) + ") " + msgString)
+      log.error("(" + display.show(key) + ") " + msgString)
     }
   }
 
@@ -488,17 +513,14 @@ object EvaluateTask {
       state: State,
       root: Task[T]
   ): (State, Result[T]) = {
-    val newState = results(root) match {
-      case Value(KeyValue(_, st: StateTransform) :: Nil) => st.state
-      case _                                             => stateTransform(results)(state)
-    }
-    (newState, results(root))
+    (stateTransform(results)(state), results(root))
   }
   def stateTransform(results: RMap[Task, Result]): State => State =
     Function.chain(
       results.toTypedSeq flatMap {
-        case results.TPair(Task(info, _), Value(v)) => info.post(v) get transformState
-        case _                                      => Nil
+        case results.TPair(_, Value(KeyValue(_, st: StateTransform))) => Some(st.transform)
+        case results.TPair(Task(info, _), Value(v))                   => info.post(v) get transformState
+        case _                                                        => Nil
       }
     )
 

@@ -16,7 +16,7 @@ object Util {
     separate(ps)(Types.idFun)
 
   def separate[T, A, B](ps: Seq[T])(f: T => Either[A, B]): (Seq[A], Seq[B]) = {
-    val (a, b) = ((Nil: Seq[A], Nil: Seq[B]) /: ps)((xs, y) => prependEither(xs, f(y)))
+    val (a, b) = ps.foldLeft((Nil: Seq[A], Nil: Seq[B]))((xs, y) => prependEither(xs, f(y)))
     (a.reverse, b.reverse)
   }
 
@@ -55,4 +55,12 @@ object Util {
 
   lazy val isNonCygwinWindows: Boolean = isWindows && !isCygwin
   lazy val isCygwinWindows: Boolean = isWindows && isCygwin
+
+  def nil[A]: List[A] = List.empty[A]
+  def nilSeq[A]: Seq[A] = Seq.empty[A]
+  def none[A]: Option[A] = (None: Option[A])
+
+  implicit class AnyOps[A](private val value: A) extends AnyVal {
+    def some: Option[A] = (Some(value): Option[A])
+  }
 }

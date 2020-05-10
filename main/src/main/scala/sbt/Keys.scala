@@ -7,21 +7,25 @@
 
 package sbt
 
+import java.nio.file.{ Path => NioPath }
 import java.io.File
 import java.net.URL
 
+import lmcoursier.definitions.{ CacheLogger, ModuleMatchers, Reconciliation }
+import lmcoursier.{ CoursierConfiguration, FallbackDependency }
 import org.apache.ivy.core.module.descriptor.ModuleDescriptor
 import org.apache.ivy.core.module.id.ModuleRevisionId
 import org.apache.logging.log4j.core.Appender
 import sbt.BuildSyntax._
 import sbt.Def.ScopedKey
 import sbt.KeyRanks._
+import sbt.internal.InMemoryCacheStore.CacheStoreFactoryFactory
 import sbt.internal._
 import sbt.internal.inc.ScalaInstance
 import sbt.internal.io.WatchState
 import sbt.internal.librarymanagement.{ CompatibilityWarningOptions, IvySbt }
 import sbt.internal.server.ServerHandler
-import sbt.internal.util.{ AttributeKey, SourcePosition }
+import sbt.internal.util.{ AttributeKey, ProgressState, SourcePosition }
 import sbt.io._
 import sbt.librarymanagement.Configurations.CompilerPlugin
 import sbt.librarymanagement.LibraryManagementCodec._
@@ -30,9 +34,9 @@ import sbt.librarymanagement.ivy.{ Credentials, IvyConfiguration, IvyPaths, Upda
 import sbt.nio.file.Glob
 import sbt.testing.Framework
 import sbt.util.{ Level, Logger }
+import xsbti.FileConverter
 import xsbti.compile._
-import lmcoursier.definitions.CacheLogger
-import lmcoursier.{ CoursierConfiguration, FallbackDependency }
+import xsbti.compile.analysis.ReadStamps
 
 import scala.concurrent.duration.{ Duration, FiniteDuration }
 import scala.xml.{ NodeSeq, Node => XNode }
@@ -194,6 +198,7 @@ object Keys {
   val semanticdbOptions = settingKey[Seq[String]]("The Scalac options introduced for SemanticDB").withRank(CSetting)
 
   val clean = taskKey[Unit]("Deletes files produced by the build, such as generated sources, compiled classes, and task caches.").withRank(APlusTask)
+  private[sbt] val cleanIvy = taskKey[Unit]("Deletes the ivy cached resolution")
   val console = taskKey[Unit]("Starts the Scala interpreter with the project classes on the classpath.").withRank(APlusTask)
   val consoleQuick = TaskKey[Unit]("consoleQuick", "Starts the Scala interpreter with the project dependencies on the classpath.", ATask, console)
   val consoleProject = taskKey[Unit]("Starts the Scala interpreter with the sbt and the build definition on the classpath and useful imports.").withRank(AMinusTask)
@@ -211,6 +216,12 @@ object Keys {
   val copyResources = taskKey[Seq[(File, File)]]("Copies resources to the output directory.").withRank(AMinusTask)
   val aggregate = settingKey[Boolean]("Configures task aggregation.").withRank(BMinusSetting)
   val sourcePositionMappers = taskKey[Seq[xsbti.Position => Option[xsbti.Position]]]("Maps positions in generated source files to the original source it was generated from").withRank(DTask)
+  private[sbt] val externalHooks = taskKey[ExternalHooks]("The external hooks used by zinc.")
+  val fileConverter = settingKey[FileConverter]("The file converter used to convert between Path and VirtualFile")
+  val allowMachinePath = settingKey[Boolean]("Allow machine-specific paths during conversion.")
+  val rootPaths = settingKey[Seq[NioPath]]("The root paths used to abstract machine-specific paths.")
+  private[sbt] val uncachedStamper = settingKey[ReadStamps]("The stamper to create timestamp or hash.")
+  private[sbt] val reusableStamper = settingKey[ReadStamps]("The stamper can be reused across subprojects and sessions.")
 
   // package keys
   val packageBin = taskKey[File]("Produces a main artifact, such as a binary jar.").withRank(ATask)
@@ -248,6 +259,7 @@ object Keys {
   val javaOptions = taskKey[Seq[String]]("Options passed to a new JVM when forking.").withRank(BPlusTask)
   val envVars = taskKey[Map[String, String]]("Environment variables used when forking a new JVM").withRank(BTask)
 
+  val bgJobServiceDirectory = settingKey[File]("The directory for temporary files used by background jobs.")
   val bgJobService = settingKey[BackgroundJobService]("Job manager used to run background jobs.")
   val bgList = taskKey[Seq[JobHandle]]("List running background jobs.")
   val ps = taskKey[Seq[JobHandle]]("bgList variant that displays on the log.")
@@ -258,6 +270,7 @@ object Keys {
   val bgRunMain = inputKey[JobHandle]("Start a provided main class as a background job")
   val fgRunMain = inputKey[Unit]("Start a provided main class as a foreground job")
   val bgCopyClasspath = settingKey[Boolean]("Copies classpath on bgRun to prevent conflict.")
+  val bgHashClasspath = settingKey[Boolean]("Toggles whether to use a hash or the last modified time to stamp the classpath jars")
   val classLoaderLayeringStrategy = settingKey[ClassLoaderLayeringStrategy]("Creates the classloader layering strategy for the particular configuration.")
 
   // Test Keys
@@ -322,6 +335,8 @@ object Keys {
   val dependencyClasspathAsJars = taskKey[Classpath]("The classpath consisting of internal and external, managed and unmanaged dependencies, all as JARs.")
   val fullClasspathAsJars = taskKey[Classpath]("The exported classpath, consisting of build products and unmanaged and managed, internal and external dependencies, all as JARs.")
   val internalDependencyConfigurations = settingKey[Seq[(ProjectRef, Set[String])]]("The project configurations that this configuration depends on")
+  val closeClassLoaders = settingKey[Boolean]("Close classloaders in run and test when the task completes.").withRank(DSetting)
+  val allowZombieClassLoaders = settingKey[Boolean]("Allow a classloader that has previously been closed by `run` or `test` to continue loading classes.")
 
   val useCoursier = settingKey[Boolean]("Use Coursier for dependency resolution.").withRank(BSetting)
   val csrCacheDirectory = settingKey[File]("Coursier cache directory. Uses -Dsbt.coursier.home or Coursier's default.").withRank(CSetting)
@@ -332,11 +347,13 @@ object Keys {
   val csrRecursiveResolvers = taskKey[Seq[Resolver]]("Resolvers of the current project, plus those of all from its inter-dependency projects")
   val csrSbtResolvers = taskKey[Seq[Resolver]]("Resolvers used for sbt artifacts.")
   val csrInterProjectDependencies = taskKey[Seq[lmcoursier.definitions.Project]]("Projects the current project depends on, possibly transitively")
+  val csrExtraProjects = taskKey[Seq[lmcoursier.definitions.Project]]("").withRank(CTask)
   val csrFallbackDependencies = taskKey[Seq[FallbackDependency]]("")
   val csrLogger = taskKey[Option[CacheLogger]]("")
   val csrExtraCredentials = taskKey[Seq[lmcoursier.credentials.Credentials]]("")
   val csrPublications = taskKey[Seq[(lmcoursier.definitions.Configuration, lmcoursier.definitions.Publication)]]("")
-
+  val csrReconciliations = settingKey[Seq[(ModuleMatchers, Reconciliation)]]("Strategy to reconcile version conflicts.")
+  
   val internalConfigurationMap = settingKey[Configuration => Configuration]("Maps configurations to the actual configuration used to define the classpath.").withRank(CSetting)
   val classpathConfiguration = taskKey[Configuration]("The configuration used to define the classpath.").withRank(CTask)
   val ivyConfiguration = taskKey[IvyConfiguration]("General dependency management (Ivy) settings, such as the resolvers and paths to use.").withRank(DTask)
@@ -376,6 +393,7 @@ object Keys {
   val packagedArtifacts = taskKey[Map[Artifact, File]]("Packages all artifacts for publishing and maps the Artifact definition to the generated file.").withRank(CTask)
   val publishMavenStyle = settingKey[Boolean]("Configures whether to generate and publish a pom (true) or Ivy file (false).").withRank(BSetting)
   val credentials = taskKey[Seq[Credentials]]("The credentials to use for updating and publishing.").withRank(BMinusTask)
+  val allCredentials = taskKey[Seq[Credentials]]("Aggregated credentials across current and root subprojects. Do not rewire this task.").withRank(DTask)
 
   val makePom = taskKey[File]("Generates a pom for publishing when publishing Maven-style.").withRank(BPlusTask)
   val deliver = taskKey[File]("Generates the Ivy file for publishing to a repository.").withRank(BTask)
@@ -405,7 +423,8 @@ object Keys {
   val fullResolvers = taskKey[Seq[Resolver]]("Combines the project resolver, default resolvers, and user-defined resolvers.").withRank(CTask)
   val otherResolvers = taskKey[Seq[Resolver]]("Resolvers not included in the main resolver chain, such as those in module configurations.").withRank(CSetting)
   val scalaCompilerBridgeResolvers = taskKey[Seq[Resolver]]("Resolvers used to resolve compiler bridges.").withRank(CSetting)
-  val useJCenter = settingKey[Boolean]("Use JCenter as the default repository.").withRank(BSetting)
+  val includePluginResolvers = settingKey[Boolean]("Include the resolvers from the metabuild.").withRank(CSetting)  
+  val useJCenter = settingKey[Boolean]("Use JCenter as the default repository.").withRank(CSetting)
   val moduleConfigurations = settingKey[Seq[ModuleConfiguration]]("Defines module configurations, which override resolvers on a per-module basis.").withRank(BMinusSetting)
   val retrievePattern = settingKey[String]("Pattern used to retrieve managed dependencies to the current build.").withRank(DSetting)
   val retrieveConfiguration = settingKey[Option[RetrieveConfiguration]]("Configures retrieving dependencies to the current build.").withRank(DSetting)
@@ -474,19 +493,27 @@ object Keys {
   object TaskProgress {
     def apply(progress: ExecuteProgress[Task]): TaskProgress = new TaskProgress(progress)
   }
+  private[sbt] val currentTaskProgress = AttributeKey[TaskProgress]("current-task-progress")
   val useSuperShell = settingKey[Boolean]("Enables (true) or disables the super shell.")
   val turbo = settingKey[Boolean]("Enables (true) or disables optional performance features.")
   // This key can be used to add custom ExecuteProgress instances
   val progressReports = settingKey[Seq[TaskProgress]]("A function that returns a list of progress reporters.").withRank(DTask)
+  private[sbt] val progressState = settingKey[Option[ProgressState]]("The optional progress state if supershell is enabled.").withRank(Invisible)
   private[sbt] val postProgressReports = settingKey[Unit]("Internally used to modify logger.").withRank(DTask)
   @deprecated("No longer used", "1.3.0")
   private[sbt] val executeProgress = settingKey[State => TaskProgress]("Experimental task execution listener.").withRank(DTask)
+  val lintUnused = inputKey[Unit]("Check for keys unused by other settings and tasks.")
+  val excludeLintKeys = settingKey[Set[Def.KeyedInitialize[_]]]("Keys excluded from lintUnused task")
+  val includeLintKeys = settingKey[Set[Def.KeyedInitialize[_]]]("Task keys that are included into lintUnused task")
+  val lintUnusedKeysOnLoad = settingKey[Boolean]("Toggles whether or not to check for unused keys during startup")
 
   val stateStreams = AttributeKey[Streams]("stateStreams", "Streams manager, which provides streams for different contexts.  Setting this on State will override the default Streams implementation.")
   val resolvedScoped = Def.resolvedScoped
   val pluginData = taskKey[PluginData]("Information from the plugin build needed in the main build definition.").withRank(DTask)
   val globalPluginUpdate = taskKey[UpdateReport]("A hook to get the UpdateReport of the global plugin.").withRank(DTask)
   private[sbt] val taskCancelStrategy = settingKey[State => TaskCancellationStrategy]("Experimental task cancellation handler.").withRank(DTask)
+  private[sbt] val cacheStoreFactoryFactory = AttributeKey[CacheStoreFactoryFactory]("cache-store-factory-factory")
+  val fileCacheSize = settingKey[String]("The approximate maximum size in bytes of the cache used to store previous task results. For example, it could be set to \"256M\" to make the maximum size 256 megabytes.")
 
   // Experimental in sbt 0.13.2 to enable grabbing semantic compile failures.
   private[sbt] val compilerReporter = taskKey[xsbti.Reporter]("Experimental hook to listen (or send) compilation failure messages.").withRank(DTask)

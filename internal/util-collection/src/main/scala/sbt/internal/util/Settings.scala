@@ -11,6 +11,7 @@ import scala.language.existentials
 
 import Types._
 import sbt.util.Show
+import Util.{ nil, nilSeq }
 
 sealed trait Settings[ScopeType] {
   def data: Map[ScopeType, AttributeMap]
@@ -177,7 +178,7 @@ trait Init[ScopeType] {
     val (defaults, others) = Util.separate[Setting[_], DefaultSetting[_], Setting[_]](ss) {
       case u: DefaultSetting[_] => Left(u); case s => Right(s)
     }
-    defaults.distinct ++ others
+    (defaults.distinct: Seq[Setting[_]]) ++ others
   }
 
   def compiled(init: Seq[Setting[_]], actual: Boolean = true)(
@@ -225,16 +226,16 @@ trait Init[ScopeType] {
     }.toMap
 
   def grouped(init: Seq[Setting[_]]): ScopedMap =
-    ((IMap.empty: ScopedMap) /: init)((m, s) => add(m, s))
+    init.foldLeft(IMap.empty: ScopedMap)((m, s) => add(m, s))
 
   def add[T](m: ScopedMap, s: Setting[T]): ScopedMap =
-    m.mapValue[T](s.key, Nil, ss => append(ss, s))
+    m.mapValue[T](s.key, Vector.empty[Setting[T]], ss => append(ss, s))
 
   def append[T](ss: Seq[Setting[T]], s: Setting[T]): Seq[Setting[T]] =
-    if (s.definitive) s :: Nil else ss :+ s
+    if (s.definitive) Vector(s) else ss :+ s
 
   def addLocal(init: Seq[Setting[_]])(implicit scopeLocal: ScopeLocal): Seq[Setting[_]] =
-    init.flatMap(_.dependencies flatMap scopeLocal) ++ init
+    init.par.map(_.dependencies flatMap scopeLocal).toVector.flatten ++ init
 
   def delegate(sMap: ScopedMap)(
       implicit delegates: ScopeType => Seq[ScopeType],
@@ -346,7 +347,7 @@ trait Init[ScopeType] {
       extends RuntimeException("References to undefined settings at runtime.") {
     override def getMessage =
       super.getMessage + undefined.map { u =>
-        "\n" + u.defining + " referenced from " + u.referencedKey
+        "\n" + u.referencedKey + " referenced from " + u.defining
       }.mkString
   }
 
@@ -382,10 +383,16 @@ trait Init[ScopeType] {
 
   def flattenLocals(compiled: CompiledMap): Map[ScopedKey[_], Flattened] = {
     val locals = compiled flatMap {
-      case (key, comp) => if (key.key.isLocal) Seq[Compiled[_]](comp) else Nil
+      case (key, comp) =>
+        if (key.key.isLocal) Seq(comp)
+        else nilSeq[Compiled[_]]
     }
     val ordered = Dag.topologicalSort(locals)(
-      _.dependencies.flatMap(dep => if (dep.key.isLocal) Seq[Compiled[_]](compiled(dep)) else Nil)
+      _.dependencies.flatMap(
+        dep =>
+          if (dep.key.isLocal) Seq[Compiled[_]](compiled(dep))
+          else nilSeq[Compiled[_]]
+      )
     )
     def flatten(
         cmap: Map[ScopedKey[_], Flattened],
@@ -394,19 +401,20 @@ trait Init[ScopeType] {
     ): Flattened =
       new Flattened(
         key,
-        deps.flatMap(dep => if (dep.key.isLocal) cmap(dep).dependencies else dep :: Nil)
+        deps.flatMap(
+          dep => if (dep.key.isLocal) cmap(dep).dependencies else Seq[ScopedKey[_]](dep).toIterable
+        )
       )
 
     val empty = Map.empty[ScopedKey[_], Flattened]
 
-    val flattenedLocals = (empty /: ordered) { (cmap, c) =>
+    val flattenedLocals = ordered.foldLeft(empty) { (cmap, c) =>
       cmap.updated(c.key, flatten(cmap, c.key, c.dependencies))
     }
 
     compiled flatMap {
       case (key, comp) =>
-        if (key.key.isLocal)
-          Nil
+        if (key.key.isLocal) nilSeq[(ScopedKey[_], Flattened)]
         else
           Seq[(ScopedKey[_], Flattened)]((key, flatten(flattenedLocals, key, comp.dependencies)))
     }
@@ -515,8 +523,8 @@ trait Init[ScopeType] {
               d.outputs ++= out
               out
             } else
-              Nil
-        } getOrElse Nil
+              nilSeq
+        } getOrElse nilSeq
       }
       derivedForKey.flatMap(localAndDerived)
     }
@@ -527,7 +535,7 @@ trait Init[ScopeType] {
     def process(rem: List[Setting[_]]): Unit = rem match {
       case s :: ss =>
         val sk = s.key
-        val ds = if (processed.add(sk)) deriveFor(sk) else Nil
+        val ds = if (processed.add(sk)) deriveFor(sk) else nil
         addDefs(ds)
         process(ds ::: ss)
       case Nil =>
@@ -537,9 +545,9 @@ trait Init[ScopeType] {
     // Take all the original defs and DerivedSettings along with locals, replace each DerivedSetting with the actual
     // settings that were derived.
     val allDefs = addLocal(init)(scopeLocal)
-    allDefs flatMap {
-      case d: DerivedSetting[_] => (derivedToStruct get d map (_.outputs)).toStream.flatten;
-      case s                    => Stream(s)
+    allDefs.flatMap {
+      case d: DerivedSetting[_] => (derivedToStruct get d map (_.outputs)).toSeq.flatten
+      case s                    => s :: nil
     }
   }
 
@@ -608,7 +616,8 @@ trait Init[ScopeType] {
   ) extends SettingsDefinition {
     def settings = this :: Nil
     def definitive: Boolean = !init.dependencies.contains(key)
-    def dependencies: Seq[ScopedKey[_]] = remove(init.dependencies, key)
+    def dependencies: Seq[ScopedKey[_]] =
+      remove(init.dependencies.asInstanceOf[Seq[ScopedKey[T]]], key)
     def mapReferenced(g: MapScoped): Setting[T] = make(key, init mapReferenced g, pos)
 
     def validateReferenced(g: ValidateRef): Either[Seq[Undefined], Setting[T]] =
@@ -859,7 +868,7 @@ trait Init[ScopeType] {
     }
 
     private[sbt] def processAttributes[S](init: S)(f: (S, AttributeMap) => S): S =
-      (init /: alist.toList(inputs)) { (v, i) =>
+      alist.toList(inputs).foldLeft(init) { (v, i) =>
         i.processAttributes(v)(f)
       }
   }

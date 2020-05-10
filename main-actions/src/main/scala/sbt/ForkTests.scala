@@ -18,6 +18,7 @@ import sbt.util.Logger
 import sbt.ConcurrentRestrictions.Tag
 import sbt.protocol.testing._
 import sbt.internal.util.ConsoleAppender
+import sbt.internal.util.Util.{ AnyOps, none }
 
 private[sbt] object ForkTests {
   def apply(
@@ -27,7 +28,7 @@ private[sbt] object ForkTests {
       classpath: Seq[File],
       fork: ForkOptions,
       log: Logger,
-      tag: Tag
+      tags: (Tag, Int)*
   ): Task[TestOutput] = {
     val opts = processOptions(config, tests, log)
 
@@ -40,9 +41,21 @@ private[sbt] object ForkTests {
         constant(TestOutput(TestResult.Passed, Map.empty[String, SuiteResult], Iterable.empty))
       else
         mainTestTask(runners, opts, classpath, fork, log, config.parallel).tagw(config.tags: _*)
-    main.tag(tag).dependsOn(all(opts.setup): _*) flatMap { results =>
+    main.tagw(tags: _*).dependsOn(all(opts.setup): _*) flatMap { results =>
       all(opts.cleanup).join.map(_ => results)
     }
+  }
+
+  def apply(
+      runners: Map[TestFramework, Runner],
+      tests: Vector[TestDefinition],
+      config: Execution,
+      classpath: Seq[File],
+      fork: ForkOptions,
+      log: Logger,
+      tag: Tag
+  ): Task[TestOutput] = {
+    apply(runners, tests, config, classpath, fork, log, tag -> 1)
   }
 
   private[this] def mainTestTask(
@@ -56,8 +69,8 @@ private[sbt] object ForkTests {
     std.TaskExtra.task {
       val server = new ServerSocket(0)
       val testListeners = opts.testListeners flatMap {
-        case tl: TestsListener => Some(tl)
-        case _                 => None
+        case tl: TestsListener => tl.some
+        case _                 => none[TestsListener]
       }
 
       object Acceptor extends Runnable {
@@ -124,7 +137,7 @@ private[sbt] object ForkTests {
         val acceptorThread = new Thread(Acceptor)
         acceptorThread.start()
 
-        val fullCp = classpath ++: Seq(
+        val fullCp = classpath ++ Seq(
           IO.classLocationPath[ForkMain].toFile,
           IO.classLocationPath[Framework].toFile
         )

@@ -48,7 +48,7 @@ object AList {
   def seq[T]: SeqList[T] = new SeqList[T] {
     def transform[M[_], N[_]](s: List[M[T]], f: M ~> N) = s.map(f.fn[T])
     def foldr[M[_], A](s: List[M[T]], f: (M[_], A) => A, init: A): A =
-      (init /: s.reverse)((t, m) => f(m, t))
+      s.reverse.foldLeft(init)((t, m) => f(m, t))
 
     override def apply[M[_], C](s: List[M[T]], f: List[T] => C)(
         implicit ap: Applicative[M]
@@ -91,9 +91,12 @@ object AList {
     ): N[P[A]] = f(a)
   }
 
-  type ASplit[K[L[x]], B[x]] = AList[λ[L[x] => K[(L ∙ B)#l]]]
+  /** Example: calling `AList.SplitK[K, Task]#l` returns the type lambda `A[x] => K[A[Task[x]]`. */
+  sealed trait SplitK[K[L[x]], B[x]] { type l[A[x]] = K[(A ∙ B)#l] }
 
-  /** AList that operates on the outer type constructor `A` of a composition `[x] A[B[x]]` for type constructors `A` and `B`*/
+  type ASplit[K[L[x]], B[x]] = AList[SplitK[K, B]#l]
+
+  /** AList that operates on the outer type constructor `A` of a composition `[x] A[B[x]]` for type constructors `A` and `B`. */
   def asplit[K[L[x]], B[x]](base: AList[K]): ASplit[K, B] = new ASplit[K, B] {
     type Split[L[x]] = K[(L ∙ B)#l]
 

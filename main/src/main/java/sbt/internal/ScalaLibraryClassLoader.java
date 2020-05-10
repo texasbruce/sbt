@@ -7,7 +7,6 @@
 
 package sbt.internal;
 
-import java.io.IOException;
 import java.net.URL;
 import java.net.URLClassLoader;
 
@@ -26,15 +25,10 @@ final class ScalaLibraryClassLoader extends URLClassLoader {
   @Override
   public String toString() {
     final StringBuilder builder = new StringBuilder();
-    for (int i = 0; i < jars.length; ++ i) {
+    for (int i = 0; i < jars.length; ++i) {
       builder.append(jars[i].toString());
       if (i < jars.length - 2) builder.append(", ");
     }
     return "ScalaLibraryClassLoader(" + builder + " parent = " + getParent() + ")";
-  }
-
-  @Override
-  public void close() throws IOException {
-    if (SysProp.closeClassLoaders()) super.close();
   }
 }

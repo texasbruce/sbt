@@ -10,10 +10,9 @@ package sbt
 import java.io.File
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier.{ isPublic, isStatic }
-import java.net.URLClassLoader
 
 import sbt.internal.inc.ScalaInstance
-import sbt.internal.inc.classpath.{ ClasspathFilter, ClasspathUtilities }
+import sbt.internal.inc.classpath.{ ClasspathFilter, ClasspathUtil }
 import sbt.internal.util.MessageOnlyException
 import sbt.io.Path
 import sbt.util.Logger
@@ -47,7 +46,7 @@ class ForkRun(config: ForkOptions) extends ScalaRun {
   }
 
   def fork(mainClass: String, classpath: Seq[File], options: Seq[String], log: Logger): Process = {
-    log.info("Running (fork) " + mainClass + " " + options.mkString(" "))
+    log.info(s"running (fork) $mainClass ${Run.runOptionsStr(options)}")
 
     val scalaOptions = classpathOption(classpath) ::: mainClass :: options.toList
     val configLogged =
@@ -59,19 +58,45 @@ class ForkRun(config: ForkOptions) extends ScalaRun {
   private def classpathOption(classpath: Seq[File]) =
     "-classpath" :: Path.makeString(classpath) :: Nil
 }
-class Run(newLoader: Seq[File] => ClassLoader, trapExit: Boolean) extends ScalaRun {
+class Run(private[sbt] val newLoader: Seq[File] => ClassLoader, trapExit: Boolean)
+    extends ScalaRun {
   def this(instance: ScalaInstance, trapExit: Boolean, nativeTmp: File) =
-    this((cp: Seq[File]) => ClasspathUtilities.makeLoader(cp, instance, nativeTmp), trapExit)
+    this(
+      (cp: Seq[File]) => ClasspathUtil.makeLoader(cp.map(_.toPath), instance, nativeTmp.toPath),
+      trapExit
+    )
 
-  /** Runs the class 'mainClass' using the given classpath and options using the scala runner.*/
-  def run(mainClass: String, classpath: Seq[File], options: Seq[String], log: Logger): Try[Unit] = {
-    log.info("Running " + mainClass + " " + options.mkString(" "))
+  private[sbt] def runWithLoader(
+      loader: ClassLoader,
+      classpath: Seq[File],
+      mainClass: String,
+      options: Seq[String],
+      log: Logger
+  ): Try[Unit] = {
+    log.info(s"running $mainClass ${Run.runOptionsStr(options)}")
 
-    def execute() =
+    def execute(): Unit =
       try {
-        run0(mainClass, classpath, options, log)
+        log.debug("  Classpath:\n\t" + classpath.mkString("\n\t"))
+        val main = getMainMethod(mainClass, loader)
+        invokeMain(loader, main, options)
       } catch {
-        case e: java.lang.reflect.InvocationTargetException => throw e.getCause
+        case e: java.lang.reflect.InvocationTargetException =>
+          e.getCause match {
+            case ex: ClassNotFoundException =>
+              val className = ex.getMessage
+              try {
+                loader.loadClass(className)
+                val msg =
+                  s"$className is on the project classpath but not visible to the ClassLoader " +
+                    "that attempted to load it.\n" +
+                    "See https://www.scala-sbt.org/1.x/docs/In-Process-Classloaders.html for " +
+                    "further information."
+                log.error(msg)
+              } catch { case NonFatal(_) => }
+              throw ex
+            case ex => throw ex
+          }
       }
     def directExecute(): Try[Unit] =
       Try(execute()) recover {
@@ -85,23 +110,15 @@ class Run(newLoader: Seq[File] => ClassLoader, trapExit: Boolean) extends ScalaR
     if (trapExit) Run.executeTrapExit(execute(), log)
     else directExecute()
   }
-  private def run0(
-      mainClassName: String,
-      classpath: Seq[File],
-      options: Seq[String],
-      log: Logger
-  ): Unit = {
-    log.debug("  Classpath:\n\t" + classpath.mkString("\n\t"))
+
+  /** Runs the class 'mainClass' using the given classpath and options using the scala runner.*/
+  def run(mainClass: String, classpath: Seq[File], options: Seq[String], log: Logger): Try[Unit] = {
     val loader = newLoader(classpath)
-    try {
-      val main = getMainMethod(mainClassName, loader)
-      invokeMain(loader, main, options)
-    } finally {
-      loader match {
-        case u: URLClassLoader  => u.close()
-        case c: ClasspathFilter => c.close()
-        case _                  =>
-      }
+    try runWithLoader(loader, classpath, mainClass, options, log)
+    finally loader match {
+      case ac: AutoCloseable  => ac.close()
+      case c: ClasspathFilter => c.close()
+      case _                  =>
     }
   }
   private def invokeMain(
@@ -159,4 +176,12 @@ object Run {
       Success(())
     } else Failure(new MessageOnlyException("Nonzero exit code: " + exitCode))
   }
+
+  // quotes the option that includes a whitespace
+  // https://github.com/sbt/sbt/issues/4834
+  private[sbt] def runOptionsStr(options: Seq[String]): String =
+    (options map {
+      case str if str.contains(" ") => "\"" + str + "\""
+      case str                      => str
+    }).mkString(" ")
 }

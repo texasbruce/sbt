@@ -161,8 +161,8 @@ final class Eval(
         case None    => ""
       }
     }
-    val i = evalCommon(definitions.map(_._1), imports, Some(""), ev)
-    new EvalDefinitions(i.loader, i.generated, i.enclosingModule, i.extra)
+    val i: EvalIntermediate[Seq[String]] = evalCommon(definitions.map(_._1), imports, Some(""), ev)
+    new EvalDefinitions(i.loader, i.generated, i.enclosingModule, i.extra.reverse)
   }
 
   private[this] def evalCommon[T](
@@ -214,7 +214,8 @@ final class Eval(
 
     val (extra, loader) = backing match {
       case Some(back) if classExists(back, moduleName) =>
-        val loader = (parent: ClassLoader) => new URLClassLoader(Array(back.toURI.toURL), parent)
+        val loader = (parent: ClassLoader) =>
+          (new URLClassLoader(Array(back.toURI.toURL), parent): ClassLoader)
         val extra = ev.read(cacheFile(back, moduleName))
         (extra, loader)
       case _ =>
@@ -313,9 +314,10 @@ final class Eval(
       )
     )
 
-    def moduleBody = Template(List(gen.scalaAnyRefConstr), noSelfType, emptyInit :: definitions)
+    def moduleBody =
+      Template(List(gen.scalaAnyRefConstr), noSelfType, (emptyInit: Tree) :: definitions)
     def moduleDef = ModuleDef(NoMods, newTermName(objectName), moduleBody)
-    parser.makePackaging(0, emptyPkg, (imports :+ moduleDef).toList)
+    parser.makePackaging(0, emptyPkg, (imports :+ (moduleDef: Tree)).toList)
   }
 
   private[this] final class TypeExtractor extends Traverser {

@@ -71,18 +71,26 @@ private[sbt] class ClassLoaderCache(
     new java.util.concurrent.ConcurrentHashMap[Key, Reference[ClassLoader]]()
   private[this] val referenceQueue = new ReferenceQueue[ClassLoader]
 
-  private[this] def closeExpiredLoaders(): Unit = {
-    val toClose = lock.synchronized(delegate.asScala.groupBy(_._1.files.toSet).flatMap {
+  private[this] def clearExpiredLoaders(): Unit = lock.synchronized {
+    val clear = (k: Key, ref: Reference[ClassLoader]) => {
+      ref.get() match {
+        case w: WrappedLoader => w.invalidate()
+        case _                =>
+      }
+      delegate.remove(k)
+      ()
+    }
+    def isInvalidated(classLoader: ClassLoader): Boolean = classLoader match {
+      case w: WrappedLoader => w.invalidated()
+      case _                => false
+    }
+    delegate.asScala.groupBy { case (k, _) => k.parent -> k.files.toSet }.foreach {
       case (_, pairs) if pairs.size > 1 =>
-        val max = pairs.maxBy(_._1.maxStamp)._1
-        pairs.filterNot(_._1 == max).flatMap {
-          case (k, v) =>
-            delegate.remove(k)
-            Option(v.get)
-        }
-      case _ => Nil
-    })
-    toClose.foreach(close)
+        val max = pairs.map(_._1.maxStamp).max
+        pairs.foreach { case (k, v) => if (k.maxStamp != max) clear(k, v) }
+      case _ =>
+    }
+    delegate.forEach((k, v) => if (isInvalidated(k.parent)) clear(k, v))
   }
   private[this] class CleanupThread(private[this] val id: Int)
       extends Thread(s"classloader-cache-cleanup-$id") {
@@ -95,9 +103,10 @@ private[sbt] class ClassLoaderCache(
           case ClassLoaderReference(key, classLoader) =>
             close(classLoader)
             delegate.remove(key)
+            ()
           case _ =>
         }
-        closeExpiredLoaders()
+        clearExpiredLoaders()
         false
       } catch {
         case _: InterruptedException => true
@@ -137,8 +146,9 @@ private[sbt] class ClassLoaderCache(
     ManagementFactory.getMemoryPoolMXBeans.asScala
       .exists(b => (b.getName == "Metaspace") && (b.getUsage.getMax > 0))
   private[this] val mkReference: (Key, ClassLoader) => Reference[ClassLoader] =
-    if (metaspaceIsLimited)(_, cl) => new SoftReference(cl, referenceQueue)
-    else ClassLoaderReference.apply
+    if (metaspaceIsLimited) { (_, cl) =>
+      (new SoftReference[ClassLoader](cl, referenceQueue): Reference[ClassLoader])
+    } else ClassLoaderReference.apply
   private[this] val cleanupThread = new CleanupThread(ClassLoaderCache.threadID.getAndIncrement())
   private[this] val lock = new Object
 
@@ -178,7 +188,7 @@ private[sbt] class ClassLoaderCache(
           val ref = mkReference(key, f())
           val loader = ref.get
           delegate.put(key, ref)
-          closeExpiredLoaders()
+          clearExpiredLoaders()
           loader
         }
         lock.synchronized {

@@ -8,6 +8,7 @@
 package sbt
 
 import java.io.File
+import java.util.Locale
 import KeyRanks.DSetting
 
 import sbt.io.{ GlobFilter, Path }
@@ -114,13 +115,19 @@ object BuildPaths {
   private[this] def defaultDependencyBase(globalBase: File) = globalBase / "dependency"
   private[this] def defaultGlobalZinc(globalBase: File) = globalBase / "zinc"
 
-  def configurationSources(base: File): Seq[File] = (base * (GlobFilter("*.sbt") - ".sbt")).get
+  def configurationSources(base: File): Seq[File] =
+    (base * (GlobFilter("*.sbt") - ".sbt")).get
+      .sortBy(_.getName.toLowerCase(Locale.ENGLISH))
   def pluginDirectory(definitionBase: File) = definitionBase / PluginsDirectoryName
 
   def evalOutputDirectory(base: File) = outputDirectory(base) / "config-classes"
   def outputDirectory(base: File) = base / DefaultTargetName
 
   def projectStandard(base: File) = base / "project"
+  def globalLoggingStandard(base: File): File =
+    base.getCanonicalFile / DefaultTargetName / GlobalLogging
+  def globalTaskDirectoryStandard(base: File): File =
+    base.getCanonicalFile / DefaultTargetName / TaskTempDirectory
 
   final val PluginsDirectoryName = "plugins"
   final val DefaultTargetName = "target"
@@ -131,6 +138,8 @@ object BuildPaths {
   final val GlobalSettingsProperty = "sbt.global.settings"
   final val DependencyBaseProperty = "sbt.dependency.base"
   final val GlobalZincProperty = "sbt.global.zinc"
+  final val GlobalLogging = "global-logging"
+  final val TaskTempDirectory = "task-temp-directory"
 
   def crossPath(base: File, instance: xsbti.compile.ScalaInstance): File =
     base / ("scala_" + instance.version)
